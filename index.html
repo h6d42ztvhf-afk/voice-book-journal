@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Voice Book Journal">
+  <meta name="mobile-web-app-capable" content="yes">
+  <title>Voice Book Journal</title>
+  <style>
+    :root { --bg: #f6f4f0; --ink: #1c1917; --muted: #57534e; --line: #d6d3d1; --card: #fff; --accent: #1d4ed8; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 16px/1.5 system-ui, sans-serif; color: var(--ink); background: var(--bg); }
+    main { max-width: 40rem; margin: 0 auto; padding: 1.25rem 1rem 3rem; }
+    h1 { font-size: 1.35rem; margin: 0 0 0.25rem; }
+    h2 { font-size: 1.1rem; margin: 1.5rem 0 0.5rem; }
+    .sub, .status, .hint, .meta { color: var(--muted); font-size: 0.9rem; }
+    button, select, textarea, input { font: inherit; }
+    textarea { width: 100%; min-height: 10rem; padding: 0.75rem; border: 1px solid var(--line); border-radius: 0.5rem; background: var(--card); }
+    .row { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0.75rem 0; align-items: center; }
+    button { padding: 0.65rem 1rem; border: 1px solid var(--line); border-radius: 0.5rem; background: var(--card); }
+    button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    button.recording { background: #b91c1c; color: #fff; border-color: #b91c1c; }
+    button:disabled { opacity: 0.55; }
+    label { display: block; margin: 0.75rem 0 0.25rem; font-size: 0.9rem; }
+    input, select { width: 100%; padding: 0.6rem 0.7rem; border: 1px solid var(--line); border-radius: 0.5rem; background: var(--card); }
+    .row input { flex: 1 1 12rem; width: auto; }
+    article { background: var(--card); border: 1px solid var(--line); border-radius: 0.5rem; padding: 0.75rem 1rem; margin: 0.5rem 0; }
+    pre.manuscript { white-space: pre-wrap; background: var(--card); border: 1px solid var(--line); padding: 1rem; border-radius: 0.5rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Voice Book Journal</h1>
+    <p class="sub">Dictate with your keyboard microphone, or tap Record where the browser supports it. Entries stay on this device.</p>
+    <p id="status" class="status"></p>
+    <div class="row">
+      <button id="recordBtn" type="button">Record</button>
+      <button id="saveBtn" type="button" class="primary">Save entry</button>
+      <button id="draftBtn" type="button">Show manuscript</button>
+    </div>
+    <label for="chapter">Chapter</label>
+    <select id="chapter"></select>
+    <label for="newChapter">Or add a chapter</label>
+    <div class="row">
+      <input id="newChapter" type="text" placeholder="New chapter title">
+      <button id="addChapterBtn" type="button">Add</button>
+    </div>
+    <label for="tags">Tags (comma-separated)</label>
+    <input id="tags" type="text" placeholder="memory, dialogue, research">
+    <label for="transcript">Entry</label>
+    <p class="hint">Tip: tap in the box and use the microphone on your phone keyboard. That works on iPhone and Android.</p>
+    <textarea id="transcript" placeholder="Speak or type your entry…"></textarea>
+    <p id="wordCount" class="meta">0 words</p>
+    <h2>Entries</h2>
+    <div id="entries"></div>
+    <h2 id="draftHeading" hidden>Manuscript draft</h2>
+    <pre id="manuscript" class="manuscript" hidden></pre>
+  </main>
+  <script>
+  (function () {
+    var STORAGE_KEY = "voice-book-journal-v1";
+    var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    var recognition = null;
+    var listening = false;
+    var baseText = "";
+
+    var statusEl = document.getElementById("status");
+    var recordBtn = document.getElementById("recordBtn");
+    var saveBtn = document.getElementById("saveBtn");
+    var draftBtn = document.getElementById("draftBtn");
+    var chapterEl = document.getElementById("chapter");
+    var newChapterEl = document.getElementById("newChapter");
+    var addChapterBtn = document.getElementById("addChapterBtn");
+    var tagsEl = document.getElementById("tags");
+    var transcriptEl = document.getElementById("transcript");
+    var wordCountEl = document.getElementById("wordCount");
+    var entriesEl = document.getElementById("entries");
+    var manuscriptEl = document.getElementById("manuscript");
+    var draftHeading = document.getElementById("draftHeading");
+
+    function load() {
+      try {
+        var raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) {
+          return {
+            chapters: [
+              { id: "inbox", title: "Inbox (unassigned)", order: 0, summary: "" },
+              { id: "ch-1", title: "Chapter 1", order: 1, summary: "" }
+            ],
+            entries: []
+          };
+        }
+        return JSON.parse(raw);
+      } catch (err) {
+        return { chapters: [{ id: "inbox", title: "Inbox (unassigned)", order: 0, summary: "" }], entries: [] };
+      }
+    }
+
+    function save(data) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    }
+
+    function uid(prefix) {
+      return prefix + "-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 7);
+    }
+
+    function wordCount(text) {
+      var parts = text.trim().split(/\s+/);
+      return text.trim() ? parts.length : 0;
+    }
+
+    function renderChapters(data) {
+      chapterEl.innerHTML = "";
+      data.chapters
+        .slice()
+        .sort(function (a, b) { return a.order - b.order; })
+        .forEach(function (ch) {
+          var opt = document.createElement("option");
+          opt.value = ch.id;
+          opt.textContent = ch.title;
+          chapterEl.appendChild(opt);
+        });
+    }
+
+    function renderEntries(data) {
+      entriesEl.innerHTML = "";
+      if (!data.entries.length) {
+        entriesEl.textContent = "No entries yet.";
+        return;
+      }
+      data.entries
+        .slice()
+        .sort(function (a, b) { return new Date(b.createdAt) - new Date(a.createdAt); })
+        .forEach(function (entry) {
+          var chapter = data.chapters.filter(function (c) { return c.id === entry.chapterId; })[0];
+          var article = document.createElement("article");
+          var heading = document.createElement("strong");
+          heading.textContent = (chapter ? chapter.title : "Inbox") + " · " + new Date(entry.createdAt).toLocaleString();
+          var body = document.createElement("p");
+          body.textContent = entry.cleanedText || entry.rawTranscript;
+          var meta = document.createElement("p");
+          meta.className = "meta";
+          meta.textContent = wordCount(body.textContent) + " words" + (entry.tags.length ? " · " + entry.tags.join(", ") : "");
+          article.appendChild(heading);
+          article.appendChild(body);
+          article.appendChild(meta);
+          entriesEl.appendChild(article);
+        });
+    }
+
+    function refresh() {
+      var data = load();
+      var selected = chapterEl.value;
+      renderChapters(data);
+      if (selected) chapterEl.value = selected;
+      renderEntries(data);
+      wordCountEl.textContent = wordCount(transcriptEl.value) + " words";
+    }
+
+    function buildManuscript(data) {
+      var blocks = [];
+      data.chapters
+        .slice()
+        .sort(function (a, b) { return a.order - b.order; })
+        .forEach(function (ch) {
+          var items = data.entries
+            .filter(function (e) { return e.chapterId === ch.id; })
+            .sort(function (a, b) { return new Date(a.createdAt) - new Date(b.createdAt); });
+          if (!items.length) return;
+          blocks.push("# " + ch.title);
+          if (ch.summary) blocks.push(ch.summary);
+          items.forEach(function (entry) {
+            blocks.push("## " + new Date(entry.createdAt).toLocaleString());
+            blocks.push(entry.cleanedText || entry.rawTranscript);
+          });
+          blocks.push("");
+        });
+      return blocks.join("\n\n");
+    }
+
+    transcriptEl.addEventListener("input", function () {
+      wordCountEl.textContent = wordCount(transcriptEl.value) + " words";
+    });
+
+    addChapterBtn.addEventListener("click", function () {
+      var title = newChapterEl.value.trim();
+      if (!title) return;
+      var data = load();
+      var maxOrder = 0;
+      data.chapters.forEach(function (ch) { if (ch.order > maxOrder) maxOrder = ch.order; });
+      var chapter = { id: uid("ch"), title: title, order: maxOrder + 1, summary: "" };
+      data.chapters.push(chapter);
+      save(data);
+      newChapterEl.value = "";
+      refresh();
+      chapterEl.value = chapter.id;
+    });
+
+    saveBtn.addEventListener("click", function () {
+      var text = transcriptEl.value.trim();
+      if (!text) {
+        statusEl.textContent = "Write or dictate something before saving.";
+        return;
+      }
+      var data = load();
+      data.entries.push({
+        id: uid("entry"),
+        createdAt: new Date().toISOString(),
+        rawTranscript: text,
+        cleanedText: text,
+        tags: tagsEl.value.split(",").map(function (t) { return t.trim(); }).filter(Boolean),
+        chapterId: chapterEl.value || "inbox"
+      });
+      save(data);
+      transcriptEl.value = "";
+      tagsEl.value = "";
+      statusEl.textContent = "Entry saved on this device.";
+      refresh();
+    });
+
+    draftBtn.addEventListener("click", function () {
+      var draft = buildManuscript(load());
+      manuscriptEl.hidden = false;
+      draftHeading.hidden = false;
+      manuscriptEl.textContent = draft || "Save an entry to build a draft.";
+    });
+
+    if (!SpeechRecognition) {
+      statusEl.textContent = "Live Record is not available in this browser. Tap the entry box and use your keyboard microphone instead — that works on iPhone and Android.";
+      recordBtn.disabled = true;
+    } else {
+      recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = document.documentElement.lang || "en-US";
+
+      recognition.onresult = function (event) {
+        var live = "";
+        var finalText = "";
+        for (var i = 0; i < event.results.length; i++) {
+          var chunk = event.results[i][0].transcript;
+          if (event.results[i].isFinal) finalText += chunk + " ";
+          else live += chunk;
+        }
+        transcriptEl.value = (baseText + " " + finalText + live).replace(/\s+/g, " ").trim();
+        wordCountEl.textContent = wordCount(transcriptEl.value) + " words";
+      };
+
+      recognition.onerror = function (event) {
+        if (event.error !== "aborted" && event.error !== "no-speech") {
+          statusEl.textContent = "Recognition error: " + event.error + ". You can still dictate with the keyboard microphone.";
+        }
+      };
+
+      recognition.onend = function () {
+        listening = false;
+        recordBtn.textContent = "Record";
+        recordBtn.classList.remove("recording");
+        statusEl.textContent = "Recording stopped. Edit the text, pick a chapter, then save.";
+      };
+
+      recordBtn.addEventListener("click", function () {
+        if (listening) {
+          recognition.stop();
+          return;
+        }
+        baseText = transcriptEl.value.trim();
+        try {
+          recognition.start();
+          listening = true;
+          recordBtn.textContent = "Stop";
+          recordBtn.classList.add("recording");
+          statusEl.textContent = "Listening… speak now. Tap Stop when you finish.";
+        } catch (err) {
+          statusEl.textContent = "Could not start recognition. Try the keyboard microphone in the entry box.";
+        }
+      });
+
+      statusEl.textContent = "Record is available in this browser. On iPhone it can be unreliable — the keyboard microphone is the backup that always works.";
+    }
+
+    refresh();
+  })();
+  </script>
+</body>
+</html>
